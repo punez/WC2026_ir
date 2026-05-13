@@ -70,7 +70,27 @@ async def _send_main(send_fn, u, lang: str):
     ]
     await send_fn(text, parse_mode="HTML", reply_markup=Markup(kb))
 
-# ── انتخاب مرحله ─────────────────────────────────────
+# ── منوی اصلی بازی‌ها ────────────────────────────────
+
+# هفته‌های گروهی (بازه UTC)
+GROUP_WEEKS = [
+    ("week1", ("2026-06-11", "2026-06-17")),
+    ("week2", ("2026-06-18", "2026-06-24")),
+    ("week3", ("2026-06-25", "2026-06-27")),
+]
+WEEK_LABEL = {
+    "week1": {"fa": "📅 هفته اول گروهی  (۱۱-۱۷ ژوئن)", "en": "📅 Group Stage Week 1  (Jun 11-17)"},
+    "week2": {"fa": "📅 هفته دوم گروهی  (۱۸-۲۴ ژوئن)", "en": "📅 Group Stage Week 2  (Jun 18-24)"},
+    "week3": {"fa": "📅 هفته سوم گروهی  (۲۵-۲۷ ژوئن)", "en": "📅 Group Stage Week 3  (Jun 25-27)"},
+}
+KNOCKOUT_STAGES = [
+    ("r32",   {"fa": "یک‌سی‌ودوم",  "en": "Round of 32"}),
+    ("r16",   {"fa": "یک‌شانزدهم", "en": "Round of 16"}),
+    ("qf",    {"fa": "یک‌چهارم",    "en": "Quarter-finals"}),
+    ("sf",    {"fa": "نیمه‌نهایی",  "en": "Semi-finals"}),
+    ("third", {"fa": "رده‌بندی سوم","en": "Third Place"}),
+    ("final", {"fa": "فینال",       "en": "Final"}),
+]
 
 async def cb_show_stages(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -81,28 +101,94 @@ async def cb_show_stages(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lang = user["lang"]
 
     kb = []
-    for stage_key, label in STAGE_LABEL.items():
+
+    # هفته‌های گروهی
+    all_group = await get_open_matches_by_stage("group")
+    open_times = {m["match_time"][:10] for m in all_group}
+
+    for week_key, (start, end) in GROUP_WEEKS:
+        # چک کن این هفته بازی باز داره
+        has_open = any(start <= t <= end for t in open_times)
+        label = WEEK_LABEL[week_key][lang]
+        if has_open:
+            kb.append([Btn(label, callback_data=f"week_{week_key}")])
+        else:
+            kb.append([Btn(f"🔒 {label}", callback_data="locked_stage")])
+
+    kb.append([Btn("─────────────", callback_data="noop")])
+
+    # مراحل حذفی
+    for stage_key, label in KNOCKOUT_STAGES:
         matches = await get_open_matches_by_stage(stage_key)
+        all_stage = await get_all_matches(stage_key)
         if matches:
-            kb.append([Btn(f"{label[lang]} ({len(matches)})",
-                           callback_data=f"stage_{stage_key}")])
+            kb.append([Btn(f"{label[lang]}  ({len(matches)})", callback_data=f"stage_{stage_key}")])
+        elif all_stage:
+            kb.append([Btn(f"🔒 {label[lang]}", callback_data="locked_stage")])
+        # اگه اصلاً بازی اضافه نشده نشون نده
 
     if not kb:
-        txt = "😔 فعلاً بازی باز برای پیش‌بینی نیست." if lang=="fa" else "😔 No open matches right now."
+        txt = "😔 فعلاً بازی‌ای برای پیش‌بینی نیست." if lang=="fa" else "😔 No matches available yet."
         await query.edit_message_text(txt, reply_markup=Markup([[
-            Btn("🔙 برگشت" if lang=="fa" else "🔙 Back", callback_data="main")]]))
+            Btn("🔙" , callback_data="main")]]))
         return
 
-    title = "⚽ کدوم مرحله؟" if lang=="fa" else "⚽ Which stage?"
     kb.append([Btn("🔙 برگشت" if lang=="fa" else "🔙 Back", callback_data="main")])
+    title = "⚽ انتخاب هفته / مرحله:" if lang=="fa" else "⚽ Select week / stage:"
     await query.edit_message_text(title, reply_markup=Markup(kb))
 
-# ── لیست بازی‌های یه مرحله ───────────────────────────
+async def cb_locked_stage(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = await get_user(query.from_user.id)
+    lang = user["lang"] if user else "fa"
+    txt = "🔒 این مرحله هنوز قفله!" if lang=="fa" else "🔒 This stage is locked!"
+    await query.answer(txt, show_alert=True)
+
+async def cb_noop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
+# ── لیست بازی‌های یک هفته گروهی ─────────────────────
+
+async def cb_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    week_key = query.data.split("_", 1)[1]
+    user = await get_user(query.from_user.id)
+    lang = user["lang"] if user else "fa"
+
+    start, end = dict(GROUP_WEEKS)[week_key]
+    all_open = await get_open_matches_by_stage("group")
+    matches = [m for m in all_open if start <= m["match_time"][:10] <= end]
+
+    if not matches:
+        await query.edit_message_text(
+            "😔 بازی باز نیست." if lang=="fa" else "😔 No open matches.",
+            reply_markup=Markup([[Btn("🔙", callback_data="show_stages")]]])
+        return
+
+    label = WEEK_LABEL[week_key][lang]
+    txt = f"<b>{label}</b>\n\n"
+    kb = []
+    for m in matches:
+        f1, f2 = flag(m["team1"]), flag(m["team2"])
+        t1 = tname(m["team1"], lang)
+        t2 = tname(m["team2"], lang)
+        pred = await get_prediction(query.from_user.id, m["id"])
+        pred_txt = f" ✏️{pred['pred1']}-{pred['pred2']}" if pred else ""
+        grp = f"[{m['grp']}] " if m["grp"] else ""
+        txt += f"{grp}{f1}{t1} vs {t2}{f2}\n🗓 {fmt_time(m['match_time'], lang)}{pred_txt}\n\n"
+        btn_label = f"{f1}{m['team1']} vs {m['team2']}{f2}{pred_txt}"
+        kb.append([Btn(btn_label, callback_data=f"predict_{m['id']}|{week_key}")])
+
+    kb.append([Btn("🔙 برگشت" if lang=="fa" else "🔙 Back", callback_data="show_stages")])
+    await query.edit_message_text(txt, parse_mode="HTML", reply_markup=Markup(kb))
+
+# ── لیست بازی‌های مراحل حذفی ─────────────────────────
 
 async def cb_stage(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    stage = query.data.split("_",1)[1]
+    stage = query.data.split("_", 1)[1]
     user = await get_user(query.from_user.id)
     lang = user["lang"] if user else "fa"
 
@@ -112,20 +198,18 @@ async def cb_stage(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             Btn("🔙", callback_data="show_stages")]]))
         return
 
-    stage_lbl = STAGE_LABEL.get(stage, {}).get(lang, stage)
+    stage_lbl = dict(KNOCKOUT_STAGES).get(stage, {}).get(lang, stage)
     txt = f"<b>{stage_lbl}</b>\n\n"
     kb = []
-
     for m in matches:
         f1, f2 = flag(m["team1"]), flag(m["team2"])
         t1 = tname(m["team1"], lang)
         t2 = tname(m["team2"], lang)
         pred = await get_prediction(query.from_user.id, m["id"])
         pred_txt = f" ✏️{pred['pred1']}-{pred['pred2']}" if pred else ""
-        grp = f"[{m['grp']}] " if m["grp"] else ""
-        txt += f"{grp}{f1}{t1} vs {t2}{f2} — {fmt_time(m['match_time'],lang)}{pred_txt}\n"
-        label = f"{f1}{m['team1']} vs {m['team2']}{f2}{pred_txt}"
-        kb.append([Btn(label, callback_data=f"predict_{m['id']}")])
+        txt += f"{f1}{t1} vs {t2}{f2}\n🗓 {fmt_time(m['match_time'], lang)}{pred_txt}\n\n"
+        kb.append([Btn(f"{f1}{m['team1']} vs {m['team2']}{f2}{pred_txt}",
+                       callback_data=f"predict_{m['id']}")])
 
     kb.append([Btn("🔙 برگشت" if lang=="fa" else "🔙 Back", callback_data="show_stages")])
     await query.edit_message_text(txt, parse_mode="HTML", reply_markup=Markup(kb))
@@ -135,7 +219,9 @@ async def cb_stage(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cb_predict_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    match_id = int(query.data.split("_")[1])
+    parts = query.data.split("|")
+    match_id = int(parts[0].split("_")[1])
+    ctx.user_data["week_key"] = parts[1] if len(parts) > 1 else None
     user = await get_user(query.from_user.id)
     lang = user["lang"] if user else "fa"
 
@@ -150,28 +236,36 @@ async def cb_predict_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["lang"] = lang
     ctx.user_data["stage"] = m["stage"]
 
+
     f1, f2 = flag(m["team1"]), flag(m["team2"])
     t1 = tname(m["team1"], lang)
     t2 = tname(m["team2"], lang)
     pred = await get_prediction(query.from_user.id, match_id)
     existing = ""
     if pred:
-        existing = (f"✏️ پیش‌بینی فعلی: <b>{pred['pred1']}-{pred['pred2']}</b>\n\n"
-                    if lang=="fa" else
-                    f"✏️ Current: <b>{pred['pred1']}-{pred['pred2']}</b>\n\n")
+        if lang == "fa":
+            existing = (f"✏️ پیش‌بینی فعلی:\n"
+                        f"{f1} <b>{t1}</b>   {pred['pred1']}\n"
+                        f"{f2} <b>{t2}</b>   {pred['pred2']}\n\n")
+        else:
+            existing = (f"✏️ Current prediction:\n"
+                        f"{f1} <b>{t1}</b>   {pred['pred1']}\n"
+                        f"{f2} <b>{t2}</b>   {pred['pred2']}\n\n")
 
     is_final_txt = (" 🔥 (× ۲)" if lang=="fa" else " 🔥 (× 2)") if m["is_final"] else ""
     if lang == "fa":
-        txt = (f"⚽ <b>{f1}{t1}  vs  {t2}{f2}</b>{is_final_txt}\n"
+        txt = (f"⚽ <b>{f1} {t1}  vs  {t2} {f2}</b>{is_final_txt}\n"
                f"🗓 {fmt_time(m['match_time'], lang)} | {m['city']}\n\n"
-               f"{existing}نتیجه‌ات رو بنویس:\n"
-               f"مثلاً: <code>2-1</code> یا <code>0-0</code>\n\n"
+               f"{existing}"
+               f"نتیجه رو بنویس — <b>{t1}</b> اول، <b>{t2}</b> دوم:\n"
+               f"مثلاً <code>2-1</code> = {t1} ۲ گل — {t2} ۱ گل\n\n"
                f"/cancel برای لغو")
     else:
-        txt = (f"⚽ <b>{f1}{t1}  vs  {t2}{f2}</b>{is_final_txt}\n"
+        txt = (f"⚽ <b>{f1} {t1}  vs  {t2} {f2}</b>{is_final_txt}\n"
                f"🗓 {fmt_time(m['match_time'], lang)} | {m['city']}\n\n"
-               f"{existing}Enter your prediction:\n"
-               f"e.g. <code>2-1</code> or <code>0-0</code>\n\n"
+               f"{existing}"
+               f"Enter score — <b>{t1}</b> first, <b>{t2}</b> second:\n"
+               f"e.g. <code>2-1</code> = {t1} 2 goals — {t2} 1 goal\n\n"
                f"/cancel to cancel")
 
     await query.edit_message_text(txt, parse_mode="HTML")
@@ -202,17 +296,23 @@ async def handle_prediction_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE
 
     if lang == "fa":
         txt = (f"✅ ثبت شد!\n\n"
-               f"{f1} <b>{t1}  {p1} – {p2}  {t2}</b> {f2}\n\n"
+               f"{f1} <b>{t1}</b>   {p1}\n"
+               f"{f2} <b>{t2}</b>   {p2}\n\n"
                f"تا شروع بازی می‌تونی عوض کنی 🔄")
     else:
         txt = (f"✅ Saved!\n\n"
-               f"{f1} <b>{t1}  {p1} – {p2}  {t2}</b> {f2}\n\n"
+               f"{f1} <b>{t1}</b>   {p1}\n"
+               f"{f2} <b>{t2}</b>   {p2}\n\n"
                f"You can change it until kickoff 🔄")
 
     stage = ctx.user_data.get("stage", "group")
+    week  = ctx.user_data.get("week_key")
+    back_cb = f"week_{week}" if week else f"stage_{stage}"
     await update.message.reply_text(txt, parse_mode="HTML", reply_markup=Markup([
+        [Btn("✏️ ویرایش" if lang=="fa" else "✏️ Edit",
+             callback_data=f"predict_{match_id}")],
         [Btn("⚽ بازی‌های بیشتر" if lang=="fa" else "⚽ More matches",
-             callback_data=f"stage_{stage}")],
+             callback_data=back_cb)],
         [Btn("🏠 منو" if lang=="fa" else "🏠 Menu", callback_data="main")],
     ]))
     return ConversationHandler.END
