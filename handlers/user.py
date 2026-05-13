@@ -163,7 +163,8 @@ async def cb_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not matches:
         await query.edit_message_text(
             "😔 بازی باز نیست." if lang=="fa" else "😔 No open matches.",
-            reply_markup=Markup([[Btn("🔙", callback_data="show_stages")]]])
+            reply_markup=Markup([[Btn("🔙", callback_data="show_stages")]])
+        )
         return
 
     label = WEEK_LABEL[week_key][lang]
